@@ -47,6 +47,7 @@ export function CreateTournamentDialog() {
       startDate: formData.startDate,
       endDate: formData.endDate,
       restCalculationMode: formData.restCalculationMode,
+      timezone: "America/Montreal",
     });
 
     if (result.success && result.id) {

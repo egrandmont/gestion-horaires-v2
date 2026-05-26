@@ -1,13 +1,23 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { eq, and } from "drizzle-orm";
+import { eq, and, inArray } from "drizzle-orm";
 import { getDb } from "@/lib/db/client";
 import { requireUserId } from "@/lib/auth/clerk";
-import { tournaments, tournamentMembers } from "@/lib/db/schema";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { buttonVariants } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
-import { ChevronRight, Settings, Sliders, Calendar, Trophy, Shield } from "lucide-react";
+import {
+  tournaments,
+  tournamentMembers,
+  arenas,
+  surfaces,
+  timeSlots,
+  categories,
+  teams,
+  formats,
+  constraints,
+  tiebreakRules,
+} from "@/lib/db/schema";
+import { WizardSteps } from "./wizard-steps";
+import { ChevronRight } from "lucide-react";
+import { ArenaInput, TimeSlotInput, CategoryInput, TeamInput, SaveFormatInput, SaveConstraintInput } from "../../actions";
 
 export const dynamic = "force-dynamic";
 
@@ -20,51 +30,143 @@ export default async function TournamentSetupPage({ params }: SetupPageProps) {
   const userId = await requireUserId();
   const db = await getDb();
 
-  // Récupérer les détails du tournoi et vérifier si l'utilisateur est membre
-  let tournament = null;
-  let memberRole = null;
+  // 1. Récupérer les détails du tournoi et valider l'appartenance de l'utilisateur
+  const results = await db
+    .select({
+      tournament: tournaments,
+      member: tournamentMembers,
+    })
+    .from(tournaments)
+    .innerJoin(tournamentMembers, eq(tournaments.id, tournamentMembers.tournamentId))
+    .where(
+      and(
+        eq(tournaments.id, id),
+        eq(tournamentMembers.userId, userId)
+      )
+    );
 
-  try {
-    const results = await db
-      .select({
-        tournament: tournaments,
-        member: tournamentMembers,
-      })
-      .from(tournaments)
-      .innerJoin(tournamentMembers, eq(tournaments.id, tournamentMembers.tournamentId))
-      .where(
-        and(
-          eq(tournaments.id, id),
-          eq(tournamentMembers.userId, userId)
-        )
-      );
-
-    if (results.length > 0) {
-      tournament = results[0].tournament;
-      memberRole = results[0].member.role;
-    }
-  } catch (error) {
-    console.error("❌ Error fetching tournament details:", error);
-  }
-
-  if (!tournament) {
+  if (results.length === 0) {
     notFound();
   }
 
-  // Formatter de date simple
-  const formatDate = (dateStr: string) => {
-    try {
-      const date = new Date(dateStr);
-      return date.toLocaleDateString("fr-CA", {
-        year: "numeric",
-        month: "long",
-        day: "numeric",
-        timeZone: "UTC",
-      });
-    } catch {
-      return dateStr;
+  const { tournament } = results[0];
+
+  // 2. Récupérer les arénas et glaces du tournoi
+  const arenasResult = await db
+    .select()
+    .from(arenas)
+    .where(eq(arenas.tournamentId, id));
+
+  const arenaIds = arenasResult.map((a) => a.id);
+  const surfacesResult = arenaIds.length > 0
+    ? await db.select().from(surfaces).where(inArray(surfaces.arenaId, arenaIds))
+    : [];
+
+  const initialArenas: ArenaInput[] = arenasResult.map((a) => ({
+    id: a.id,
+    name: a.name,
+    address: a.address || undefined,
+    surfaces: surfacesResult
+      .filter((s) => s.arenaId === a.id)
+      .map((s) => ({ id: s.id, name: s.name })),
+  }));
+
+  // 3. Récupérer les plages horaires (time slots) pour toutes les glaces du tournoi
+  const surfaceIds = surfacesResult.map((s) => s.id);
+  const timeSlotsResult = surfaceIds.length > 0
+    ? await db.select().from(timeSlots).where(inArray(timeSlots.surfaceId, surfaceIds))
+    : [];
+
+  const initialTimeSlots: TimeSlotInput[] = timeSlotsResult.map((ts) => ({
+    id: ts.id,
+    surfaceId: ts.surfaceId,
+    date: ts.date,
+    startTime: ts.startTime,
+    durationMinutes: ts.durationMinutes,
+    status: ts.status as "open" | "blocked",
+    note: ts.note || undefined,
+  }));
+
+  // 4. Récupérer les catégories
+  const categoriesResult = await db
+    .select()
+    .from(categories)
+    .where(eq(categories.tournamentId, id));
+
+  const initialCategories: CategoryInput[] = categoriesResult.map((c) => ({
+    id: c.id,
+    ageValue: c.ageValue,
+    ageConvention: c.ageConvention as "year" | "tier",
+    level: c.level || undefined,
+    gender: c.gender as "M" | "F" | undefined,
+    displayLabel: c.displayLabel,
+  }));
+
+  const categoryIds = categoriesResult.map((c) => c.id);
+
+  // 5. Récupérer les équipes par catégorie
+  const teamsResult = categoryIds.length > 0
+    ? await db.select().from(teams).where(inArray(teams.categoryId, categoryIds))
+    : [];
+
+  const initialTeams: Record<string, TeamInput[]> = {};
+  for (const catId of categoryIds) {
+    initialTeams[catId] = teamsResult
+      .filter((t) => t.categoryId === catId)
+      .map((t) => ({
+        id: t.id,
+        name: t.name,
+        club: t.club || undefined,
+      }));
+  }
+
+  // 6. Récupérer le format de jeu par catégorie
+  const formatsResult = categoryIds.length > 0
+    ? await db.select().from(formats).where(inArray(formats.categoryId, categoryIds))
+    : [];
+
+  const initialFormats: Record<string, SaveFormatInput> = {};
+  for (const catId of categoryIds) {
+    const f = formatsResult.find((x) => x.categoryId === catId);
+    if (f) {
+      initialFormats[catId] = {
+        prelimType: f.prelimType as "round_robin" | "pools",
+        guaranteedMatches: f.guaranteedMatches,
+        prelimGameMinutes: f.prelimGameMinutes,
+        prelimResurfaceMinutes: f.prelimResurfaceMinutes,
+        prelimSlotMinutes: f.prelimSlotMinutes,
+        playoffGameMinutes: f.playoffGameMinutes,
+        playoffResurfaceMinutes: f.playoffResurfaceMinutes,
+        playoffSlotMinutes: f.playoffSlotMinutes,
+      };
     }
-  };
+  }
+
+  // 7. Récupérer les contraintes
+  const constraintsResult = await db
+    .select()
+    .from(constraints)
+    .where(eq(constraints.tournamentId, id));
+
+  const initialConstraints: SaveConstraintInput[] = constraintsResult.map((c) => ({
+    id: c.id,
+    scope: c.scope as "tournament" | "category" | "team",
+    scopeId: c.scopeId || undefined,
+    type: c.type,
+    params: c.params as Record<string, any>,
+    isHard: c.isHard,
+    weight: c.weight || undefined,
+  }));
+
+  // 8. Récupérer l'ordre des critères de départage
+  const tiebreakRulesResult = await db
+    .select()
+    .from(tiebreakRules)
+    .where(eq(tiebreakRules.tournamentId, id));
+
+  const initialTiebreakers = tiebreakRulesResult.length > 0
+    ? (tiebreakRulesResult[0].orderedCriteria as string[])
+    : [];
 
   return (
     <div className="space-y-8">
@@ -82,108 +184,30 @@ export default async function TournamentSetupPage({ params }: SetupPageProps) {
         <div>
           <h1 className="text-3xl font-extrabold text-white tracking-tight">{tournament.name}</h1>
           <p className="text-zinc-400 text-sm mt-1">
-            Assistant de configuration de votre tournoi de hockey.
+            Configurez et préparez les paramètres de planification de votre tournoi de hockey.
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          <Link
-            href="/tournaments"
-            className={cn(
-              buttonVariants({ variant: "outline" }),
-              "border-zinc-800 text-zinc-300 hover:bg-zinc-800 hover:text-white cursor-pointer"
-            )}
-          >
-            Retour aux tournois
-          </Link>
-        </div>
       </div>
 
-      {/* Jalon 2 Banner Info */}
-      <div className="p-6 rounded-2xl bg-gradient-to-r from-blue-950/40 to-cyan-950/20 border border-blue-900/40 text-zinc-100 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-        <div className="space-y-2">
-          <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full text-xs font-semibold bg-blue-900/50 text-blue-200 border border-blue-800/60">
-            Étape en attente — Jalon 2
-          </div>
-          <h2 className="text-lg font-bold text-white">Assistant de configuration en 6 étapes</h2>
-          <p className="text-zinc-400 text-sm leading-relaxed max-w-2xl">
-            L'assistant complet permettant de configurer vos arénas, glaces, catégories de jeu, équipes, formats de tournoi et règles de départage sera pleinement fonctionnel lors du **Jalon 2**.
-          </p>
-        </div>
-        <div className="flex items-center gap-3 self-stretch md:self-auto justify-end">
-          <div className="h-10 w-10 rounded-xl bg-blue-900/30 flex items-center justify-center text-blue-400 border border-blue-800/20">
-            <Sliders className="h-5 w-5 animate-pulse" />
-          </div>
-        </div>
-      </div>
-
-      {/* Tournament Details Card */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {/* Basic Info */}
-        <Card className="bg-zinc-900/40 border-zinc-800 backdrop-blur-sm md:col-span-2">
-          <CardHeader>
-            <CardTitle className="text-lg font-bold text-white flex items-center gap-2">
-              <Settings className="h-5 w-5 text-blue-400" />
-              Paramètres fondamentaux
-            </CardTitle>
-            <CardDescription className="text-zinc-400">
-              Détails configurés lors de la création du tournoi.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-6 pt-0 border-t border-zinc-800/40 mt-2">
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-6">
-              <div className="space-y-1">
-                <span className="text-xs text-zinc-500 font-semibold uppercase tracking-wider">Nom du tournoi</span>
-                <p className="text-white font-medium">{tournament.name}</p>
-              </div>
-              <div className="space-y-1">
-                <span className="text-xs text-zinc-500 font-semibold uppercase tracking-wider">Rôle de l'utilisateur</span>
-                <div className="flex items-center gap-2 text-zinc-300">
-                  <Shield className="h-4 w-4 text-blue-400" />
-                  <span className="capitalize">{memberRole === "owner" ? "Propriétaire" : "Organisateur"}</span>
-                </div>
-              </div>
-              <div className="space-y-1">
-                <span className="text-xs text-zinc-500 font-semibold uppercase tracking-wider">Période du tournoi</span>
-                <div className="flex items-center gap-2 text-zinc-300">
-                  <Calendar className="h-4 w-4 text-zinc-500" />
-                  <span>
-                    Du {formatDate(tournament.startDate)} au {formatDate(tournament.endDate)}
-                  </span>
-                </div>
-              </div>
-              <div className="space-y-1">
-                <span className="text-xs text-zinc-500 font-semibold uppercase tracking-wider">Mode de calcul du repos</span>
-                <p className="text-zinc-300 font-medium">
-                  {tournament.restCalculationMode === "end_to_start" ? "Fin à début" : "Début à début"}
-                </p>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Sidebar Info */}
-        <Card className="bg-zinc-900/40 border-zinc-800 backdrop-blur-sm">
-          <CardHeader>
-            <CardTitle className="text-lg font-bold text-white flex items-center gap-2">
-              <Trophy className="h-5 w-5 text-cyan-400" />
-              Prochaines étapes
-            </CardTitle>
-            <CardDescription className="text-zinc-400">
-              Ce que vous pourrez configurer bientôt :
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4 pt-0 border-t border-zinc-800/40 mt-2">
-            <ul className="space-y-3 text-sm text-zinc-400 list-decimal list-inside pt-6">
-              <li>Arénas et glaces de jeu</li>
-              <li>Catégories (Âge / Niveau / Sexe)</li>
-              <li>Équipes participantes</li>
-              <li>Formats (Round-robin, pools, brackets)</li>
-              <li>Contraintes dures et souples</li>
-              <li>Ordre des critères de départage</li>
-            </ul>
-          </CardContent>
-        </Card>
-      </div>
+      {/* Step Wizard Client Component */}
+      <WizardSteps
+        tournament={{
+          id: tournament.id,
+          name: tournament.name,
+          startDate: tournament.startDate,
+          endDate: tournament.endDate,
+          timezone: tournament.timezone,
+          status: tournament.status as "planning" | "active" | "completed",
+          restCalculationMode: tournament.restCalculationMode as "start_to_start" | "end_to_start",
+        }}
+        initialArenas={initialArenas}
+        initialTimeSlots={initialTimeSlots}
+        initialCategories={initialCategories}
+        initialTeams={initialTeams}
+        initialFormats={initialFormats}
+        initialConstraints={initialConstraints}
+        initialTiebreakers={initialTiebreakers}
+      />
     </div>
   );
 }
