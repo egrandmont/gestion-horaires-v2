@@ -20,12 +20,14 @@ L'outil doit être **d'une facilité déconcertante à utiliser** pour un béné
 
 ---
 
-## 2. Stack technique imposée
+## 2. Stack technique retenue et justification
 
-- **Frontend / hébergement** : Next.js (App Router) déployé sur Vercel, via repo GitHub.
-- **Backend / base de données** : Supabase (PostgreSQL, Auth, Row-Level Security, Realtime pour la saisie de scores en direct).
-- **Moteur d'optimisation** : OR-Tools (CP-SAT, programmation par contraintes). Comme OR-Tools est une bibliothèque Python, l'exposer via un service Python séparé (par exemple un endpoint serverless Python, ou un petit service conteneurisé appelé par l'API Next.js). Claude Code décide de l'approche d'intégration la plus propre pour Vercel + Supabase, mais le moteur DOIT être OR-Tools CP-SAT, pas une heuristique maison.
-- **Design** : utiliser impérativement le skill `frontend-design` pour toute l'interface, afin d'obtenir une UI distinctive et de qualité production, en évitant l'esthétique générique.
+- **Frontend / hébergement** : Next.js 16 (App Router) déployé sur Vercel, via repo GitHub.
+- **Backend / base de données** : Neon PostgreSQL Serverless. En raison des contraintes budgétaires (Supabase coûtant 10 $/mois par projet actif, ce qui est surdimensionné pour ce projet à faible trafic), la base de données PostgreSQL serverless Neon a été choisie.
+- **Authentification** : Clerk (tier gratuit jusqu'à 10 000 utilisateurs actifs mensuels). L'authentification des organisateurs s'effectue via Magic Link. L'intégration de Neon Authorize permet d'extraire de manière sécurisée l'ID utilisateur Clerk du JWT directement dans PostgreSQL pour appliquer les politiques de sécurité (RLS) natives de la base de données.
+- **Moteur d'optimisation** : OR-Tools (CP-SAT, programmation par contraintes) hébergé de manière serverless sur Modal.com. Cela permet d'exécuter des calculs lourds de planification sur CPU sans les limites de temps des fonctions serverless web traditionnelles, tout en gardant un coût nul ou minime (scale-to-zero).
+- **Design** : shadcn/ui et Tailwind CSS v4, garantissant une esthétique haut de gamme (thème sombre, effet de flou/verre dépoli, composants interactifs fluides) sans esthétique générique.
+
 
 ---
 
