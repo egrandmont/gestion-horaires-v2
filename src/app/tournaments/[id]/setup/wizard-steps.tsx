@@ -10,6 +10,8 @@ import {
   saveTeamsAction,
   saveFormatAction,
   saveRulesAndTiebreakersAction,
+  generatePreliminaryMatchupsAction,
+  runPreliminarySolverAction,
   ArenaInput,
   TimeSlotInput,
   CategoryInput,
@@ -52,6 +54,17 @@ import { cn } from "@/lib/utils";
 
 // --- INTERFACES ---
 
+export interface MatchInput {
+  id: string;
+  categoryId: string;
+  poolId?: string;
+  homeTeamId?: string;
+  awayTeamId?: string;
+  surfaceId?: string;
+  slotId?: string;
+  phase: "preliminary" | "playoff";
+}
+
 interface WizardStepsProps {
   tournament: {
     id: string;
@@ -69,6 +82,7 @@ interface WizardStepsProps {
   initialFormats: Record<string, SaveFormatInput>; // categoryId -> format
   initialConstraints: SaveConstraintInput[];
   initialTiebreakers: string[];
+  initialMatches: MatchInput[];
 }
 
 export function WizardSteps({
@@ -80,6 +94,7 @@ export function WizardSteps({
   initialFormats,
   initialConstraints,
   initialTiebreakers,
+  initialMatches,
 }: WizardStepsProps) {
   const router = useRouter();
   const [step, setStep] = useState(1);
@@ -143,6 +158,13 @@ export function WizardSteps({
           "random",
         ]
   );
+
+  // Étape 7 : Planification & Génération
+  const [matchesData, setMatchesData] = useState<MatchInput[]>(initialMatches);
+
+  useEffect(() => {
+    setMatchesData(initialMatches);
+  }, [initialMatches]);
 
   const criteriaLabels: Record<string, string> = {
     points: "Plus grand nombre de points",
@@ -275,6 +297,7 @@ export function WizardSteps({
             { n: 4, label: "Équipes", icon: Users },
             { n: 5, label: "Formats", icon: Grid },
             { n: 6, label: "Règles", icon: Sliders },
+            { n: 7, label: "Planification", icon: Sparkles },
           ].map((s) => {
             const Icon = s.icon;
             const active = step === s.n;
@@ -1404,6 +1427,165 @@ export function WizardSteps({
             </Card>
           </div>
         )}
+
+        {/* STEP 7: PLANIFICATION & GENERATION */}
+        {step === 7 && (
+          <div className="space-y-6">
+            <Card className="bg-zinc-900/40 border-zinc-800 backdrop-blur-sm">
+              <CardHeader>
+                <CardTitle className="text-xl font-bold text-white flex items-center gap-2">
+                  <Sparkles className="h-5 w-5 text-yellow-400 animate-pulse" />
+                  Génération des confrontations & Planification
+                </CardTitle>
+                <CardDescription className="text-zinc-400">
+                  Générez les affrontements préliminaires puis lancez l'optimiseur d'horaires.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-6">
+                {/* 1. Résumé de la configuration */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-4 rounded-xl bg-zinc-950/40 border border-zinc-850">
+                  <div className="space-y-1">
+                    <span className="text-zinc-500 text-xs uppercase font-bold">Arénas / Glaces</span>
+                    <p className="text-xl font-extrabold text-white">
+                      {arenasData.length} / {arenasData.reduce((acc, a) => acc + a.surfaces.length, 0)}
+                    </p>
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-zinc-500 text-xs uppercase font-bold">Créneaux ouverts</span>
+                    <p className="text-xl font-extrabold text-white">{timeSlotsData.filter(s => s.status === "open").length}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-zinc-500 text-xs uppercase font-bold">Catégories</span>
+                    <p className="text-xl font-extrabold text-white">{categoriesData.length}</p>
+                  </div>
+                  <div className="space-y-1">
+                    <span className="text-zinc-500 text-xs uppercase font-bold">Équipes inscrites</span>
+                    <p className="text-xl font-extrabold text-white">
+                      {Object.values(teamsData).reduce((acc, list) => acc + list.length, 0)}
+                    </p>
+                  </div>
+                </div>
+
+                {/* 2. Actions */}
+                <div className="flex flex-col sm:flex-row gap-4 justify-center py-4 border-t border-zinc-900">
+                  <Button
+                    onClick={async () => {
+                      setLoading(true);
+                      setError(null);
+                      setSuccess(null);
+                      try {
+                        const res = await generatePreliminaryMatchupsAction(tournament.id);
+                        if (res.success && res.matches) {
+                          setMatchesData(res.matches);
+                          setSuccess("Toutes les confrontations préliminaires ont été générées avec succès !");
+                        } else {
+                          setError(res.error || "Une erreur est survenue lors de la génération.");
+                        }
+                      } catch (e: any) {
+                        setError(e.message || "Erreur de connexion.");
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                    disabled={loading || categoriesData.length === 0}
+                    className="bg-zinc-800 text-white border border-zinc-700 hover:bg-zinc-700 font-semibold cursor-pointer py-6 px-8 h-auto"
+                  >
+                    Générer les confrontations ({matchesData.length} existantes)
+                  </Button>
+
+                  <Button
+                    onClick={async () => {
+                      setLoading(true);
+                      setError(null);
+                      setSuccess(null);
+                      try {
+                        const res = await runPreliminarySolverAction(tournament.id);
+                        if (res.success) {
+                          setSuccess("Planning préliminaire généré et enregistré avec succès ! Redirection...");
+                          setTimeout(() => {
+                            router.push(`/tournaments/${tournament.id}/schedule`);
+                          }, 2000);
+                        } else {
+                          setError(res.error || "La planification a échoué. Vérifiez vos contraintes ou vos créneaux.");
+                        }
+                      } catch (e: any) {
+                        setError(e.message || "Erreur lors de la planification.");
+                      } finally {
+                        setLoading(false);
+                      }
+                    }}
+                    disabled={loading || matchesData.length === 0}
+                    className="bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-bold cursor-pointer py-6 px-8 h-auto"
+                  >
+                    Lancer le moteur d'optimisation
+                  </Button>
+                </div>
+
+                {/* 3. Aperçu des matchs par catégorie */}
+                {matchesData.length > 0 && (
+                  <div className="space-y-4 pt-4 border-t border-zinc-900">
+                    <h3 className="text-lg font-bold text-white">Aperçu des confrontations générées</h3>
+                    <div className="space-y-6 max-h-[400px] overflow-y-auto pr-2">
+                      {categoriesData.map((cat) => {
+                        const catMatches = matchesData.filter(m => m.categoryId === cat.id);
+                        if (catMatches.length === 0) return null;
+
+                        const poolIds = Array.from(new Set(catMatches.map(m => m.poolId).filter((id): id is string => !!id)));
+
+                        return (
+                          <div key={cat.id} className="space-y-3 bg-zinc-950/40 p-4 rounded-xl border border-zinc-850">
+                            <h4 className="font-bold text-cyan-400 text-sm">{cat.displayLabel}</h4>
+                            
+                            {poolIds.length > 0 ? (
+                              <div className="space-y-4">
+                                {poolIds.map((pId) => {
+                                  const poolMatches = catMatches.filter(m => m.poolId === pId);
+                                  const teamsList = teamsData[cat.id || ""] || [];
+                                  
+                                  return (
+                                    <div key={pId} className="space-y-2 pl-2 border-l border-zinc-800">
+                                      <span className="text-xs font-bold text-zinc-400 uppercase">Poule</span>
+                                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                        {poolMatches.map((m, idx) => {
+                                          const hName = teamsList.find(t => t.id === m.homeTeamId)?.name || "À déterminer";
+                                          const aName = teamsList.find(t => t.id === m.awayTeamId)?.name || "À déterminer";
+                                          return (
+                                            <div key={m.id || idx} className="text-xs bg-zinc-900 p-2 rounded border border-zinc-850 text-zinc-300 flex items-center justify-between">
+                                              <span>{hName} <span className="text-zinc-500 font-normal">vs</span> {aName}</span>
+                                              {m.slotId && <span className="text-[10px] text-green-400 font-bold bg-green-950/40 px-1.5 py-0.5 rounded border border-green-900/30">Planifié</span>}
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : (
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                {catMatches.map((m, idx) => {
+                                  const teamsList = teamsData[cat.id || ""] || [];
+                                  const hName = teamsList.find(t => t.id === m.homeTeamId)?.name || "À déterminer";
+                                  const aName = teamsList.find(t => t.id === m.awayTeamId)?.name || "À déterminer";
+                                  return (
+                                    <div key={m.id || idx} className="text-xs bg-zinc-900 p-2 rounded border border-zinc-850 text-zinc-300 flex items-center justify-between">
+                                      <span>{hName} <span className="text-zinc-500 font-normal">vs</span> {aName}</span>
+                                      {m.slotId && <span className="text-[10px] text-green-400 font-bold bg-green-950/40 px-1.5 py-0.5 rounded border border-green-900/30">Planifié</span>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        )}
       </div>
 
       {/* Navigation Controls */}
@@ -1418,7 +1600,7 @@ export function WizardSteps({
           Précédent
         </Button>
 
-        {step < 6 ? (
+        {step < 7 ? (
           <Button
             onClick={() => handleSaveStep(step + 1)}
             disabled={loading}
@@ -1429,12 +1611,12 @@ export function WizardSteps({
           </Button>
         ) : (
           <Button
-            onClick={() => handleSaveStep(6)}
+            onClick={() => router.push(`/tournaments/${tournament.id}/schedule`)}
             disabled={loading}
             className="bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white font-semibold cursor-pointer"
           >
-            Sauvegarder et terminer
-            <Check className="ml-2 h-4 w-4" />
+            Aller à l'horaire
+            <ChevronRight className="ml-2 h-4 w-4" />
           </Button>
         )}
       </div>

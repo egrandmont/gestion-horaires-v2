@@ -14,6 +14,7 @@ import {
   formats,
   constraints,
   tiebreakRules,
+  matches,
 } from "@/lib/db/schema";
 import { WizardSteps } from "./wizard-steps";
 import { ChevronRight } from "lucide-react";
@@ -168,6 +169,22 @@ export default async function TournamentSetupPage({ params }: SetupPageProps) {
     ? (tiebreakRulesResult[0].orderedCriteria as string[])
     : [];
 
+  // 9. Récupérer les matchs déjà générés
+  const matchesResult = categoryIds.length > 0
+    ? await db.select().from(matches).where(inArray(matches.categoryId, categoryIds))
+    : [];
+
+  const initialMatches = matchesResult.map((m) => ({
+    id: m.id,
+    categoryId: m.categoryId,
+    poolId: m.poolId || undefined,
+    homeTeamId: m.homeTeamId || undefined,
+    awayTeamId: m.awayTeamId || undefined,
+    surfaceId: m.surfaceId || undefined,
+    slotId: m.slotId || undefined,
+    phase: m.phase as "preliminary" | "playoff",
+  }));
+
   return (
     <div className="space-y-8">
       {/* Breadcrumbs / Back button */}
@@ -207,6 +224,7 @@ export default async function TournamentSetupPage({ params }: SetupPageProps) {
         initialFormats={initialFormats}
         initialConstraints={initialConstraints}
         initialTiebreakers={initialTiebreakers}
+        initialMatches={initialMatches}
       />
     </div>
   );

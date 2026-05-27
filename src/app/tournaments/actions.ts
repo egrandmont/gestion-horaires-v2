@@ -15,7 +15,11 @@ import {
   formats,
   constraints,
   tiebreakRules,
+  pools,
+  poolMemberships,
+  matches,
 } from "@/lib/db/schema";
+import { solveSchedule } from "@/lib/solver-client";
 
 // --- TYPES ---
 
@@ -526,5 +530,350 @@ export async function saveRulesAndTiebreakersAction(
   } catch (error: any) {
     console.error("❌ Error in saveRulesAndTiebreakersAction:", error);
     return { success: false, error: error.message || "Erreur de sauvegarde." };
+  }
+}
+
+/**
+ * Génère toutes les confrontations préliminaires pour chaque catégorie du tournoi.
+ * Répartit automatiquement en poules si le format est "pools".
+ */
+export async function generatePreliminaryMatchupsAction(tournamentId: string) {
+  try {
+    const db = await getDb();
+    await requireUserId();
+
+    const generatedMatches = await db.transaction(async (tx) => {
+      // 1. Charger toutes les catégories pour ce tournoi
+      const catList = await tx
+        .select()
+        .from(categories)
+        .where(eq(categories.tournamentId, tournamentId));
+
+      if (catList.length === 0) {
+        throw new Error("Aucune catégorie de configurée pour ce tournoi.");
+      }
+
+      const catIds = catList.map((c) => c.id);
+
+      // 2. Nettoyer les anciens matchs préliminaires et poules (on cascade automatique)
+      await tx
+        .delete(matches)
+        .where(and(inArray(matches.categoryId, catIds), eq(matches.phase, "preliminary")));
+
+      await tx.delete(pools).where(inArray(pools.categoryId, catIds));
+
+      // 3. Pour chaque catégorie, générer les affrontements selon le format
+      for (const cat of catList) {
+        // Charger le format de la catégorie
+        const [fmt] = await tx
+          .select()
+          .from(formats)
+          .where(eq(formats.categoryId, cat.id));
+
+        const prelimType = fmt?.prelimType || "round_robin";
+        const gameMinutes = fmt?.prelimGameMinutes || 60;
+        const resurfaceMinutes = fmt?.prelimResurfaceMinutes || 10;
+        const slotMinutes = fmt?.prelimSlotMinutes || 70;
+
+        // Charger toutes les équipes de cette catégorie
+        const catTeams = await tx
+          .select()
+          .from(teams)
+          .where(eq(teams.categoryId, cat.id));
+
+        if (catTeams.length < 2) {
+          // Besoin d'au moins 2 équipes pour faire des matchs
+          continue;
+        }
+
+        if (prelimType === "pools") {
+          // Diviser en poules équilibrées de 3 à 5 équipes
+          // num_pools = Math.floor((N + 2) / 4), minimum 1
+          const numPools = Math.max(1, Math.floor((catTeams.length + 2) / 4));
+          
+          // Initialiser les listes d'équipes par poule
+          const poolBuckets: typeof catTeams[] = Array.from({ length: numPools }, () => []);
+          catTeams.forEach((team, idx) => {
+            poolBuckets[idx % numPools].push(team);
+          });
+
+          // Créer chaque poule en DB, lier les équipes et générer les confrontations
+          for (let pIdx = 0; pIdx < numPools; pIdx++) {
+            const poolTeams = poolBuckets[pIdx];
+            if (poolTeams.length < 2) continue;
+
+            const poolName = `Poule ${String.fromCharCode(65 + pIdx)}`;
+            const [insertedPool] = await tx
+              .insert(pools)
+              .values({
+                categoryId: cat.id,
+                name: poolName,
+              })
+              .returning();
+
+            // Lier les équipes à la poule
+            await tx.insert(poolMemberships).values(
+              poolTeams.map((t) => ({
+                poolId: insertedPool.id,
+                teamId: t.id,
+              }))
+            );
+
+            // Générer le round-robin de poule
+            for (let i = 0; i < poolTeams.length; i++) {
+              for (let j = i + 1; j < poolTeams.length; j++) {
+                await tx.insert(matches).values({
+                  categoryId: cat.id,
+                  poolId: insertedPool.id,
+                  phase: "preliminary",
+                  homeTeamId: poolTeams[i].id,
+                  awayTeamId: poolTeams[j].id,
+                  gameMinutes,
+                  resurfaceMinutes,
+                  slotMinutes,
+                  status: "scheduled",
+                });
+              }
+            }
+          }
+        } else {
+          // Mode round-robin global
+          for (let i = 0; i < catTeams.length; i++) {
+            for (let j = i + 1; j < catTeams.length; j++) {
+              await tx.insert(matches).values({
+                categoryId: cat.id,
+                phase: "preliminary",
+                homeTeamId: catTeams[i].id,
+                awayTeamId: catTeams[j].id,
+                gameMinutes,
+                resurfaceMinutes,
+                slotMinutes,
+                status: "scheduled",
+              });
+            }
+          }
+        }
+      }
+
+      const matchesResult = await tx
+        .select()
+        .from(matches)
+        .where(and(inArray(matches.categoryId, catIds), eq(matches.phase, "preliminary")));
+
+      return matchesResult.map((m) => ({
+        id: m.id,
+        categoryId: m.categoryId,
+        poolId: m.poolId || undefined,
+        homeTeamId: m.homeTeamId || undefined,
+        awayTeamId: m.awayTeamId || undefined,
+        surfaceId: m.surfaceId || undefined,
+        slotId: m.slotId || undefined,
+        phase: m.phase as "preliminary" | "playoff",
+      }));
+    });
+
+    revalidatePath(`/tournaments/${tournamentId}/setup`);
+    return { success: true, matches: generatedMatches };
+  } catch (error: any) {
+    console.error("❌ Error in generatePreliminaryMatchupsAction:", error);
+    return { success: false, error: error.message || "Erreur de génération des confrontations." };
+  }
+}
+
+/**
+ * Lance le solveur d'optimisation (Modal / local mock) pour planifier les matchs préliminaires générés.
+ */
+export async function runPreliminarySolverAction(tournamentId: string) {
+  try {
+    const db = await getDb();
+    await requireUserId();
+
+    // 1. Charger les métadonnées fondamentales du tournoi
+    const [tournament] = await db
+      .select()
+      .from(tournaments)
+      .where(eq(tournaments.id, tournamentId));
+
+    if (!tournament) {
+      throw new Error("Tournoi introuvable.");
+    }
+
+    // 2. Charger les catégories et leurs équipes
+    const catList = await db
+      .select()
+      .from(categories)
+      .where(eq(categories.tournamentId, tournamentId));
+
+    if (catList.length === 0) {
+      throw new Error("Aucune catégorie dans ce tournoi.");
+    }
+
+    const catIds = catList.map((c) => c.id);
+    const teamList = await db
+      .select()
+      .from(teams)
+      .where(inArray(teams.categoryId, catIds));
+
+    // 3. Charger tous les créneaux libres disponibles du tournoi
+    const arenaList = await db
+      .select()
+      .from(arenas)
+      .where(eq(arenas.tournamentId, tournamentId));
+
+    if (arenaList.length === 0) {
+      throw new Error("Veuillez configurer au moins un aréna.");
+    }
+
+    const arenaIds = arenaList.map((a) => a.id);
+    const surfaceList = await db
+      .select()
+      .from(surfaces)
+      .where(inArray(surfaces.arenaId, arenaIds));
+
+    if (surfaceList.length === 0) {
+      throw new Error("Veuillez configurer au moins une glace.");
+    }
+
+    const surfaceIds = surfaceList.map((s) => s.id);
+    const slotList = await db
+      .select()
+      .from(timeSlots)
+      .where(
+        and(
+          inArray(timeSlots.surfaceId, surfaceIds),
+          eq(timeSlots.status, "open")
+        )
+      );
+
+    if (slotList.length === 0) {
+      throw new Error("Veuillez ajouter des plages horaires (créneaux ouverts) pour votre tournoi.");
+    }
+
+    // 4. Charger toutes les confrontations préliminaires créées
+    const matchList = await db
+      .select()
+      .from(matches)
+      .where(
+        and(
+          inArray(matches.categoryId, catIds),
+          eq(matches.phase, "preliminary")
+        )
+      );
+
+    if (matchList.length === 0) {
+      throw new Error("Veuillez d'abord générer les affrontements préliminaires à l'étape 7.");
+    }
+
+    // 5. Charger les contraintes
+    const constraintList = await db
+      .select()
+      .from(constraints)
+      .where(eq(constraints.tournamentId, tournamentId));
+
+    // Trouver le repos minimum strict (min_rest)
+    const minRestRule = constraintList.find((c) => c.type === "min_rest");
+    const minRestMinutes = minRestRule?.params ? (minRestRule.params as any).min_minutes : 180;
+
+    // Prépare le payload de l'API solveur
+    const payload = {
+      tournament_id: tournamentId,
+      phase: "preliminary" as const,
+      rest_calculation_mode: tournament.restCalculationMode,
+      teams: teamList.map((t) => ({
+        id: t.id,
+        category_id: t.categoryId,
+        name: t.name,
+        club: t.club || undefined,
+      })),
+      slots: slotList.map((s) => ({
+        id: s.id,
+        surface_id: s.surfaceId,
+        date: s.date,
+        start_time: s.startTime,
+        duration_minutes: s.durationMinutes,
+      })),
+      matchups: matchList.map((m) => ({
+        id: m.id,
+        category_id: m.categoryId,
+        pool_id: m.poolId || undefined,
+        home_team_id: m.homeTeamId || undefined,
+        away_team_id: m.awayTeamId || undefined,
+        duration_minutes: m.slotMinutes,
+      })),
+      hard_constraints: {
+        min_rest_minutes: minRestMinutes,
+        prevent_team_overlap: true,
+        respect_ice_capacity: true,
+      },
+      soft_constraints: {
+        target_rest_minutes: 240,
+        max_daily_games_per_team: 2,
+        weights: {
+          rest_target_deviation: 10,
+          daily_game_limit_violation: 100,
+          long_wait_between_games: 5,
+        },
+      },
+      time_limit_seconds: 300,
+      seed: 42,
+    };
+
+    // 6. Appeler le solveur d'optimisation
+    const result = await solveSchedule(payload);
+
+    if (result.status === "INFEASIBLE") {
+      return {
+        success: false,
+        error: result.diagnostics?.message || "La planification est infaisable avec les contraintes courantes.",
+      };
+    }
+
+    // Map rapide pour retrouver la surface liée à un créneau (slot_id)
+    const slotSurfaceMap = new Map<string, string>();
+    slotList.forEach((s) => {
+      slotSurfaceMap.set(s.id, s.surfaceId);
+    });
+
+    // 7. Enregistrer les résultats de planification en DB
+    await db.transaction(async (tx) => {
+      // Réinitialiser les anciennes affectations de la ronde préliminaire pour ce tournoi
+      await tx
+        .update(matches)
+        .set({
+          slotId: null,
+          surfaceId: null,
+        })
+        .where(
+          and(
+            inArray(matches.categoryId, catIds),
+            eq(matches.phase, "preliminary")
+          )
+        );
+
+      // Appliquer les nouvelles affectations
+      for (const assign of result.assignments) {
+        const surfId = slotSurfaceMap.get(assign.slot_id);
+        if (!surfId) continue;
+
+        await tx
+          .update(matches)
+          .set({
+            slotId: assign.slot_id,
+            surfaceId: surfId,
+          })
+          .where(eq(matches.id, assign.match_id));
+      }
+    });
+
+    revalidatePath(`/tournaments/${tournamentId}/setup`);
+    revalidatePath(`/tournaments/${tournamentId}/schedule`);
+
+    return {
+      success: true,
+      diagnostics: result.diagnostics,
+    };
+  } catch (error: any) {
+    console.error("❌ Error in runPreliminarySolverAction:", error);
+    return { success: false, error: error.message || "Erreur lors de l'exécution du solveur." };
   }
 }

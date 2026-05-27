@@ -5,10 +5,12 @@ from main import solve_schedule_logic
 app = modal.App("hockey-tournament-solver")
 
 # Construction de l'image de conteneur avec les packages requis
-image = modal.Image.debian_slim().pip_install_from_requirements("requirements.txt")
+import os
+req_path = os.path.join(os.path.dirname(__file__), "requirements.txt")
+image = modal.Image.debian_slim().pip_install_from_requirements(req_path)
 
 @app.function(image=image)
-@modal.web_endpoint(method="POST", label="solve")
+@modal.fastapi_endpoint(method="POST", label="solve")
 def solve_schedule(payload: dict) -> dict:
     """
     Point d'accès HTTP (web endpoint) sur Modal.
