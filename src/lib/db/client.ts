@@ -14,8 +14,9 @@ export async function getDb() {
 
   try {
     const { getToken } = await auth();
-    // "neon" est le nom du template JWT configuré dans Clerk pour Neon
+    console.log("🔑 [getDb] auth() retrieved. Getting token...");
     const token = await getToken({ template: "neon" });
+    console.log(`🔑 [getDb] Token found: ${!!token}`);
 
     if (token) {
       // Connexion via le rôle `authenticated` avec RLS Neon.
@@ -24,16 +25,20 @@ export async function getDb() {
         process.env.DATABASE_AUTHENTICATED_URL ||
         url.replace(/(postgres(?:ql)?:\/\/)[^:]*(?::[^@]*)?(@.+)/, "$1authenticated:$2");
 
+      console.log(`🔑 [getDb] Connecting as authenticated role to: ${authenticatedUrl.replace(/:[^@/]*@/, ":***@")}`);
       const sql = neon(authenticatedUrl, {
         authToken: async () => token,
       });
       return drizzle({ client: sql, schema });
+    } else {
+      console.log("🔑 [getDb] No token returned for 'neon' template.");
     }
-  } catch (error) {
-    // Contexte hors-requête (build) ou utilisateur non connecté
+  } catch (error: any) {
+    console.error("🔑 [getDb] Error retrieving auth/token:", error.message || error);
   }
 
   // Fallback sur la connexion standard (non authentifiée ou via mot de passe classique)
+  console.log(`🔑 [getDb] Falling back to standard databaseUrl connection: ${url.replace(/:[^@/]*@/, ":***@")}`);
   const sql = neon(url);
   return drizzle({ client: sql, schema });
 }

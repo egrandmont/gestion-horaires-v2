@@ -32,6 +32,9 @@ export default async function TournamentsPage() {
       .where(eq(tournamentMembers.userId, userId));
   } catch (error: any) {
     console.error("❌ Error fetching tournaments:", error);
+    if (error.cause) {
+      console.error("❌ Database Error Cause:", error.cause);
+    }
     errorMsg = `Impossible de charger vos tournois : ${error.message || error}`;
   }
 
