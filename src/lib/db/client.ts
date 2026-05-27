@@ -9,11 +9,6 @@ if (!databaseUrl && process.env.NODE_ENV !== "production") {
   console.warn("⚠️ DATABASE_URL is not set. DB calls will fail.");
 }
 
-/**
- * Récupère une instance de Drizzle configurée.
- * Si l'utilisateur est authentifié, on injecte son JWT Clerk pour que Neon Authorize
- * applique la RLS native de PostgreSQL de manière sécurisée.
- */
 export async function getDb() {
   const url = databaseUrl || "postgres://dummy:dummy@localhost:5432/dummy";
 
@@ -23,12 +18,15 @@ export async function getDb() {
     const token = await getToken({ template: "neon" });
 
     if (token) {
-      // Remplace le mot de passe d'origine par le jeton JWT Clerk dans l'URL de connexion
-      const authenticatedUrl = url.replace(
-        /(postgres(?:ql)?:\/\/[^:]+:)[^@]+(@.+)/,
-        `$1${token}$2`
-      );
-      const sql = neon(authenticatedUrl);
+      // Connexion via le rôle `authenticated` avec RLS Neon.
+      // Si DATABASE_AUTHENTICATED_URL n'est pas configuré, on le dérive de DATABASE_URL.
+      const authenticatedUrl =
+        process.env.DATABASE_AUTHENTICATED_URL ||
+        url.replace(/(postgres(?:ql)?:\/\/)[^:]*(?::[^@]*)?(@.+)/, "$1authenticated:$2");
+
+      const sql = neon(authenticatedUrl, {
+        authToken: async () => token,
+      });
       return drizzle({ client: sql, schema });
     }
   } catch (error) {
@@ -39,4 +37,5 @@ export async function getDb() {
   const sql = neon(url);
   return drizzle({ client: sql, schema });
 }
+
 
