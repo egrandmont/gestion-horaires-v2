@@ -32,7 +32,7 @@ export default async function TournamentsPage() {
       .where(eq(tournamentMembers.userId, userId));
   } catch (error: any) {
     console.error("❌ Error fetching tournaments:", error);
-    errorMsg = "Impossible de charger vos tournois pour le moment. Veuillez vérifier la configuration de votre base de données.";
+    errorMsg = `Impossible de charger vos tournois : ${error.message || error}`;
   }
 
   // Formatter de date simple
